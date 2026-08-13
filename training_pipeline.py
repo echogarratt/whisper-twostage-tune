@@ -21,7 +21,7 @@ torch.backends.cudnn.allow_tf32 = True
 # ============================================================
 # CONFIG
 # ============================================================
-DEFAULT_MODEL_ID = "openai/whisper-medium"
+DEFAULT_MODEL_ID = "openai/whisper-small"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_SPEAKERS = ["F000", "M001", "F002", "M003", "M004", "M005"]
 
@@ -30,7 +30,7 @@ DEFAULT_MAX_AUDIO_SECONDS = 30
 DEFAULT_INTERMEDIATE_DATASET_DIR = "/mnt/parscratch/users/acd22dg/dataset-transformer"
 DEFAULT_INTERMEDIATE_METADATA_PATH = "/mnt/parscratch/users/acd22dg/dataset-transformer/metadata.csv"
 DEFAULT_INTERMEDIATE_OUTPUT_DIR = "/mnt/parscratch/users/acd22dg/whisper-intermediate-output"
-DEFAULT_INTERMEDIATE_NUM_TRAIN_EPOCHS = 5
+DEFAULT_INTERMEDIATE_NUM_TRAIN_EPOCHS = 4
 
 DEFAULT_FINETUNE_DATASET_PATH = "/mnt/parscratch/users/acd22dg/dataset-original"
 DEFAULT_FINETUNE_METADATA_PATH = os.path.join(DEFAULT_FINETUNE_DATASET_PATH, "metadata.csv")
@@ -220,9 +220,11 @@ class WhisperTrainingPipeline:
         model.generation_config.num_beams = 1
         model.config.use_cache = False
 
+        # Configure encoder freezing
         for p in model.model.encoder.parameters():
             p.requires_grad = not freeze_encoder
 
+        # Configure decoder freezing (includes proj_out to avoid partial freezing)
         for p in model.model.decoder.parameters():
             p.requires_grad = not freeze_decoder
         if hasattr(model, "proj_out"):
@@ -283,31 +285,56 @@ class WhisperTrainingPipeline:
             attn_implementation="sdpa"
         )
 
-        model = self._configure_model(model, freeze_decoder=False, freeze_encoder=False)
+        # Decoder frozen: intermediate stage only adapts the encoder to the
+        # (synthetic) target-domain acoustics; the decoder's pretrained
+        # language model is left untouched.
+        model = self._configure_model(model, freeze_decoder=True, freeze_encoder=False)
         collator = DataCollatorSpeechSeq2SeqWithPadding(self.processor, model.config.decoder_start_token_id)
 
-        effective_batch_size = 16 * 4 
+        # whisper-small + decoder frozen means substantially less memory
+        # pressure than the old whisper-medium/full-fine-tune setup (no
+        # Adam optimizer state for the decoder, smaller model overall), so
+        # we can push per-device batch size up while keeping the same
+        # effective batch size via fewer accumulation steps - same training
+        # dynamics, less accumulation overhead.
+        per_device_batch = 32
+        grad_accum_steps = 2
+        effective_batch_size = per_device_batch * grad_accum_steps  # 64, same as before
         steps_per_epoch = max(1, len(intermediate_train_ds) // effective_batch_size)
-        
+
         intermediate_args = Seq2SeqTrainingArguments(
             output_dir=output_dir,
-            per_device_train_batch_size=16,
-            gradient_accumulation_steps=4,
+            per_device_train_batch_size=per_device_batch,
+            gradient_accumulation_steps=grad_accum_steps,
             gradient_checkpointing=True,
-            learning_rate=1e-5,
+            # Only the encoder is trainable now (decoder frozen). LR 1e-5
+            # was tuned for full unfrozen fine-tuning of whisper-medium;
+            # with a much smaller trainable-parameter subset on
+            # whisper-small, bumping this up gives the encoder a real
+            # chance to move within a fixed epoch budget.
+            learning_rate=3e-5,
             warmup_steps=min(500, steps_per_epoch * self.intermediate_num_train_epochs // 5),
             num_train_epochs=self.intermediate_num_train_epochs,
             bf16=True,
             tf32=True,
             torch_compile=False,
+            # Still eval per epoch for visibility into synthetic-domain WER,
+            # but no longer used to pick a checkpoint (see below).
             eval_strategy="epoch" if intermediate_eval_ds else "no",
-            save_strategy="epoch" if intermediate_eval_ds else "no",
+            # No early stopping, so no need to keep per-epoch checkpoints
+            # around either - just save whatever's in memory at the end.
+            save_strategy="no",
             per_device_eval_batch_size=8,
             predict_with_generate=True,
             generation_max_length=225,
-            save_total_limit=2,
-            load_best_model_at_end=True if intermediate_eval_ds else False,
-            metric_for_best_model="wer" if intermediate_eval_ds else None,
+            # load_best_model_at_end intentionally OFF: it was selecting
+            # checkpoints by WER on the synthetic eval split, which may not
+            # correlate with real-speaker performance - that mismatch is a
+            # live suspect for why intermediate tuning isn't helping. Take
+            # the final-epoch model instead of second-guessing which epoch
+            # was "best" on a metric we don't trust yet.
+            load_best_model_at_end=False,
+            metric_for_best_model=None,
             greater_is_better=False,
             dataloader_drop_last=True,
             dataloader_num_workers=8,
@@ -320,7 +347,10 @@ class WhisperTrainingPipeline:
             ddp_timeout=3600,
         )
 
-        callbacks = [EarlyStoppingCallback(early_stopping_patience=self.finetune_early_stopping_patience)] if intermediate_eval_ds else None
+        # Early stopping removed: with load_best_model_at_end off and no
+        # trusted stopping metric, just run the full configured epoch
+        # budget every time.
+        callbacks = None
 
         intermediate_trainer = Seq2SeqTrainer(
             model=model, args=intermediate_args,
@@ -383,18 +413,39 @@ class WhisperTrainingPipeline:
             attn_implementation="sdpa"
         )
 
-        model = self._configure_model(model, freeze_decoder=False, freeze_encoder=False)
+        # Decoder frozen: fine-tune stage only adapts the encoder to the
+        # real target speaker's acoustics; the decoder's language model
+        # stays as pretrained (or as left by the intermediate stage).
+        model = self._configure_model(model, freeze_decoder=True, freeze_encoder=False)
 
         processor_ft = WhisperProcessor.from_pretrained(spk_base_model)
         finetune_collator = DataCollatorSpeechSeq2SeqWithPadding(processor_ft, model.config.decoder_start_token_id)
-        steps_per_epoch = max(1, len(train_ds) // 64)
+
+        # Fine-tune sets are ~90 real training utterances/speaker - an order
+        # of magnitude smaller than the intermediate stage. The old config
+        # reused the intermediate stage's effective batch size of 64 with
+        # dataloader_drop_last=True, which meant ~1 optimizer step per
+        # epoch (steps_per_epoch = 90 // 64 = 1) and silently dropped
+        # whatever didn't fill a batch of 16 every epoch. Use a batch size
+        # that's actually appropriate for this dataset size instead.
+        finetune_per_device_batch_size = 8
+        finetune_grad_accum_steps = 1
+        finetune_effective_batch_size = finetune_per_device_batch_size * finetune_grad_accum_steps
+        steps_per_epoch = max(1, len(train_ds) // finetune_effective_batch_size)
 
         finetune_args = Seq2SeqTrainingArguments(
             output_dir=f"{self.finetune_output_dir}/{target}",
-            per_device_train_batch_size=16,
-            gradient_accumulation_steps=4,
+            per_device_train_batch_size=finetune_per_device_batch_size,
+            gradient_accumulation_steps=finetune_grad_accum_steps,
             gradient_checkpointing=True,
-            learning_rate=1e-5,
+            # Encoder-only training here too, and weight_decay is already
+            # doing some overfitting insurance. A slightly higher LR than
+            # the old full-fine-tune default gives the encoder a real
+            # chance to adapt within 10 epochs on ~90 examples, though kept
+            # lower than the intermediate stage's LR since this dataset is
+            # ~100x smaller and overfits much faster.
+            learning_rate=2e-5,
+            weight_decay=0.01,  # extra regularization - tiny dataset, easy to overfit
             warmup_steps=min(500, steps_per_epoch * self.finetune_num_train_epochs // 5),
             num_train_epochs=self.finetune_num_train_epochs,
             bf16=True,
@@ -409,7 +460,7 @@ class WhisperTrainingPipeline:
             load_best_model_at_end=True,
             metric_for_best_model="wer",
             greater_is_better=False,
-            dataloader_drop_last=True,
+            dataloader_drop_last=False,  # don't silently discard ~10% of an already tiny set
             dataloader_num_workers=8,
             dataloader_pin_memory=True,
             dataloader_prefetch_factor=2,
@@ -471,6 +522,7 @@ class WhisperTrainingPipeline:
         print(table.to_string())
 
         os.makedirs(self.finetune_output_dir, exist_ok=True)
+        # Avoid race conditions: write per-speaker CSV if evaluating a single target speaker
         if len(targets) == 1:
             table.to_csv(os.path.join(self.finetune_output_dir, f"wer_{targets[0]}.csv"))
         else:
@@ -561,7 +613,7 @@ class WhisperTrainingPipeline:
         print(table.to_string())
 
         os.makedirs(self.finetune_output_dir, exist_ok=True)
-        
+        # Avoid race conditions: write per-speaker CSV if evaluating a single target speaker
         if len(eval_speakers) == 1:
             table.to_csv(os.path.join(self.finetune_output_dir, f"wer_{eval_speakers[0]}.csv"))
         else:
@@ -638,4 +690,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()x
+    main()

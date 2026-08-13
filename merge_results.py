@@ -7,7 +7,6 @@ import pandas as pd
 DEFAULT_RESULTS_DIR = "/mnt/parscratch/users/acd22dg/experiments/results"
 DEFAULT_OUT_DIR = "/mnt/parscratch/users/acd22dg/experiments"
 
-
 def load_results(results_dir: str) -> pd.DataFrame:
     rows = []
     for path in sorted(glob.glob(os.path.join(results_dir, "*.json"))):
@@ -20,7 +19,6 @@ def load_results(results_dir: str) -> pd.DataFrame:
         raise SystemExit(f"No result files found in {results_dir}")
     return pd.DataFrame(rows)
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", default=DEFAULT_RESULTS_DIR)
@@ -28,6 +26,9 @@ def main():
     args = parser.parse_args()
 
     df = load_results(args.results_dir)
+
+    if "whisper_version" in df.columns:
+        df = df[df["whisper_version"] == "openai/whisper-small"]
 
     df["wer"] = df["fine_tuned_wer"].combine_first(df["zero_shot_wer"])
 
@@ -57,7 +58,6 @@ def main():
     print(" WER SUMMARY (rows = speaker, cols = config) ")
     print("=" * 80)
     print(pivot.to_string())
-
 
 if __name__ == "__main__":
     main()
