@@ -1,6 +1,6 @@
 # Whisper two-step tune
 
-Based on [1], this code provides a skeleton on which to perform fine tuning experiments with Whisper models, using an intermediate step. There are also setup files to create intermediate datasets using the CSM-1B [citation needed] Neural Audio Codec.
+Based on [1], this code provides a skeleton on which to perform fine tuning experiments with Whisper models, using an intermediate step. There are also setup files to create intermediate datasets using the CSM-1B [2] TTS model.
 
 ## Description
 
@@ -25,10 +25,11 @@ School of Computer Science\
 University of Sheffield\
 edgarratt1@sheffield.ac.uk
 
-
 ## License
 
 This project is licensed under the [NAME HERE] License - see the LICENSE.md file for details
 
 ## References
 [1] Violeta LP, Ma D, Huang WC, Toda T. Intermediate fine-tuning using imperfect synthetic speech for improving electrolaryngeal speech recognition. In ICASSP 2023-2023 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) 2023 Jun 4 (pp. 1-5). IEEE.
+
+[2] Sesame AI Labs. CSM-1B: Conversational Speech Model [Computer software]. San Francisco: Sesame AI; 2025. Available from: github.com

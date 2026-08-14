@@ -6,7 +6,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Optional
 
-from training_pipeline import WhisperTrainingPipeline, DEFAULT_MODEL_ID
+from training_pipeline import WhisperTrainingPipeline
 
 # ============================================================
 # CONFIG
@@ -15,7 +15,21 @@ from training_pipeline import WhisperTrainingPipeline, DEFAULT_MODEL_ID
 SPEAKERS = ["F000", "M001", "F002", "M003", "M004", "M005"]
 
 RESULTS_DIR = "/mnt/parscratch/users/acd22dg/experiments/results"
-DEFAULT_WHISPER_VERSION = DEFAULT_MODEL_ID
+
+DEFAULT_WHISPER_VERSION = "openai/whisper-medium"
+
+FREEZE_ENCODER = False
+FREEZE_DECODER = False
+INTERMEDIATE_LEARNING_RATE = 1e-5
+FINETUNE_LEARNING_RATE = 1e-5
+
+INTERMEDIATE_PER_DEVICE_BATCH_SIZE = 16
+INTERMEDIATE_GRAD_ACCUM_STEPS = 4
+FINETUNE_PER_DEVICE_BATCH_SIZE = 8
+FINETUNE_GRAD_ACCUM_STEPS = 8
+
+INTERMEDIATE_EPOCHS = 5
+FINETUNE_EPOCHS = 10
 
 
 @dataclass
@@ -23,13 +37,13 @@ class IntermediateConfig:
     name: str
     path: str
     sample_rate: int = 16000
-    epochs: int = 3
+    epochs: int = INTERMEDIATE_EPOCHS
 
 @dataclass
 class FinalTuneConfig:
     name: str
     path: str
-    epochs: int = 10
+    epochs: int = FINETUNE_EPOCHS
 
 @dataclass
 class TrainingTask:
@@ -42,61 +56,50 @@ class TrainingTask:
 # STAGES
 # ============================================================
 
-inters = [
-    None,
-    IntermediateConfig(
+INTERMEDIATES = {
+    "no_inter": None,
+    "trans_tts": IntermediateConfig(
         name="trans_tts",
         path="/mnt/parscratch/users/acd22dg/datasets-final/transformertts",
         sample_rate=16000,
-        epochs=5
     ),
-    IntermediateConfig(
-        name="nactts_general",
+    "nactts_gen": IntermediateConfig(
+        name="nactts_gen",
         path="/mnt/parscratch/users/acd22dg/datasets-final/nac-all",
         sample_rate=16000,
-        epochs=5
     ),
-    IntermediateConfig(
-        name="nactts_speaker",
+    "nactts_spk": IntermediateConfig(
+        name="nactts_spk",
         path="/mnt/parscratch/users/acd22dg/datasets-final/nac-personal",
         sample_rate=16000,
-        epochs=5
     ),
-]
+}
 
-finals = [
-    None,
-    FinalTuneConfig(
-        name="all_speakers",
+FINETUNES = {
+    "no_ft": None,
+    "all": FinalTuneConfig(
+        name="all",
         path="/mnt/parscratch/users/acd22dg/datasets-final/all-new",
-        epochs=10
     ),
-    FinalTuneConfig(
-        name="target_speaker",
+    "target": FinalTuneConfig(
+        name="target",
         path="/mnt/parscratch/users/acd22dg/datasets-final/target-new",
-        epochs=20
     ),
+}
+
+configs: list[TrainingTask] = [
+    TrainingTask(name=f"medium_{inter_key}__{ft_key}",
+                 intermediate=INTERMEDIATES[inter_key],
+                 finetune=FINETUNES[ft_key],
+                 speakers=SPEAKERS)
+    for inter_key in ["no_inter", "trans_tts", "nactts_gen", "nactts_spk"]
+    for ft_key in ["no_ft", "all", "target"]
 ]
-
-configs: list[TrainingTask] = []
-
-for inter in inters:
-    for final in finals:
-        inter_str = inter.name if inter else "no_intermediate"
-        final_str = final.name if final else "no_finetune"
-        task_name = f"{inter_str}__vs__{final_str}"
-
-        configs.append(TrainingTask(
-            name=task_name,
-            intermediate=inter,
-            finetune=final,
-            speakers=SPEAKERS
-        ))
 
 NUM_CONFIGS = len(configs)
 NUM_SPEAKERS = len(SPEAKERS)
 # Total SLURM array size needed to cover every (config, speaker) pair:
-#   --array=0-{NUM_CONFIGS * NUM_SPEAKERS - 1}
+#   --array=0-{NUM_CONFIGS * NUM_SPEAKERS - 1}   (12 * 6 - 1 = 71)
 
 # ============================================================
 # WORKER (single config, single speaker, single process)
@@ -131,12 +134,21 @@ def run_task_for_speaker(task: TrainingTask, speaker: str, whisper_version: str 
         finetune_output_dir=os.path.join(base_output_dir, "finetune_results"),
         finetune_num_train_epochs=fine_epochs,
         speakers=[speaker],
+        freeze_encoder=FREEZE_ENCODER,
+        freeze_decoder=FREEZE_DECODER,
+        intermediate_learning_rate=INTERMEDIATE_LEARNING_RATE,
+        finetune_learning_rate=FINETUNE_LEARNING_RATE,
+        intermediate_per_device_batch_size=INTERMEDIATE_PER_DEVICE_BATCH_SIZE,
+        intermediate_grad_accum_steps=INTERMEDIATE_GRAD_ACCUM_STEPS,
+        finetune_per_device_batch_size=FINETUNE_PER_DEVICE_BATCH_SIZE,
+        finetune_grad_accum_steps=FINETUNE_GRAD_ACCUM_STEPS,
     )
 
     print(f"############ CONFIG: {task.name} | SPEAKER: {speaker} | "
           f"WHISPER: {whisper_version} | "
           f"INTERMEDIATE: {task.intermediate.name if task.intermediate else 'None'} | "
-          f"FINE-TUNING: {task.finetune.name if task.finetune else 'None'} ############")
+          f"FINE-TUNING: {task.finetune.name if task.finetune else 'None'} | "
+          f"freeze_encoder={FREEZE_ENCODER} freeze_decoder={FREEZE_DECODER} ############")
 
     result = {
         "config": task.name,
