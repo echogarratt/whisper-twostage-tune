@@ -2,10 +2,6 @@
 
 Based on [1], this code provides a skeleton on which to perform fine tuning experiments with Whisper models, using an intermediate step. There are also setup files to create intermediate datasets using the CSM-1B [citation needed] Neural Audio Codec.
 
-## Description
-
-An in-depth paragraph about your project and overview of use.
-
 ### Two step tuning
 
 The backbone of two step tuning is `training_pipeline.py`. This provides some relatively sensible default values for tuning, and some default locations for datasets. These are hardcoded and you must update them if using this script.
