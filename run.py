@@ -64,13 +64,13 @@ INTERMEDIATES = {
         sample_rate=16000,
     ),
     "nactts_gen": IntermediateConfig(
-        name="nactts_gen",
-        path="/mnt/parscratch/users/acd22dg/datasets-final/nac-all",
+        name="nactts_gen-noise",
+        path="/mnt/parscratch/users/acd22dg/datasets-final/nac-all-noise",
         sample_rate=16000,
     ),
     "nactts_spk": IntermediateConfig(
-        name="nactts_spk",
-        path="/mnt/parscratch/users/acd22dg/datasets-final/nac-personal",
+        name="nactts_spk-noise",
+        path="/mnt/parscratch/users/acd22dg/datasets-final/nac-personal-noise",
         sample_rate=16000,
     ),
 }

@@ -2,10 +2,6 @@
 
 Based on [1], this code provides a skeleton on which to perform fine tuning experiments with Whisper models, using an intermediate step. There are also setup files to create intermediate datasets using the CSM-1B [2] TTS model.
 
-## Description
-
-An in-depth paragraph about your project and overview of use.
-
 ### Two step tuning
 
 The backbone of two step tuning is `training_pipeline.py`. This provides some relatively sensible default values for tuning, and some default locations for datasets. These are hardcoded and you must update them if using this script.
@@ -24,10 +20,6 @@ Echo Garratt\
 School of Computer Science\
 University of Sheffield\
 edgarratt1@sheffield.ac.uk
-
-## License
-
-This project is licensed under the [NAME HERE] License - see the LICENSE.md file for details
 
 ## References
 [1] Violeta LP, Ma D, Huang WC, Toda T. Intermediate fine-tuning using imperfect synthetic speech for improving electrolaryngeal speech recognition. In ICASSP 2023-2023 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) 2023 Jun 4 (pp. 1-5). IEEE.
